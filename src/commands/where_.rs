@@ -1,8 +1,8 @@
 use crate::commands::PerItemCommand;
-use crate::errors::ShellError;
-use crate::parser::hir::SyntaxType;
-use crate::parser::registry;
+use crate::context::CommandRegistry;
 use crate::prelude::*;
+use nu_errors::ShellError;
+use nu_protocol::{CallInfo, ReturnSuccess, Scope, Signature, SyntaxShape, UntaggedValue, Value};
 
 pub struct Where;
 
@@ -11,47 +11,48 @@ impl PerItemCommand for Where {
         "where"
     }
 
-    fn signature(&self) -> registry::Signature {
-        Signature::build("where").required("condition", SyntaxType::Block)
+    fn signature(&self) -> Signature {
+        Signature::build("where").required(
+            "condition",
+            SyntaxShape::Block,
+            "the condition that must match",
+        )
+    }
+
+    fn usage(&self) -> &str {
+        "Filter table to match the condition."
     }
 
     fn run(
         &self,
         call_info: &CallInfo,
-        _registry: &registry::CommandRegistry,
-        _shell_manager: &ShellManager,
-        input: Tagged<Value>,
+        _registry: &CommandRegistry,
+        _raw_args: &RawCommandArgs,
+        input: Value,
     ) -> Result<OutputStream, ShellError> {
-        let input_clone = input.clone();
         let condition = call_info.args.expect_nth(0)?;
         let stream = match condition {
-            Tagged {
-                item: Value::Block(block),
-                tag,
+            Value {
+                value: UntaggedValue::Block(block),
+                ..
             } => {
-                let result = block.invoke(&input_clone);
+                let result = block.invoke(&Scope::new(input.clone()));
                 match result {
                     Ok(v) => {
                         if v.is_true() {
-                            VecDeque::from(vec![Ok(ReturnSuccess::Value(input_clone))])
+                            VecDeque::from(vec![Ok(ReturnSuccess::Value(input))])
                         } else {
                             VecDeque::new()
                         }
                     }
-                    Err(e) => {
-                        return Err(ShellError::labeled_error(
-                            format!("Could not evaluate ({})", e.to_string()),
-                            "could not evaluate",
-                            tag.span,
-                        ))
-                    }
+                    Err(e) => return Err(e),
                 }
             }
-            Tagged { tag, .. } => {
+            Value { tag, .. } => {
                 return Err(ShellError::labeled_error(
                     "Expected a condition",
                     "where needs a condition",
-                    tag.span,
+                    tag,
                 ))
             }
         };

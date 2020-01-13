@@ -1,8 +1,9 @@
 use crate::commands::command::RunnablePerItemContext;
-use crate::errors::ShellError;
-use crate::parser::hir::SyntaxType;
-use crate::parser::registry::{CommandRegistry, Signature};
+use crate::context::CommandRegistry;
 use crate::prelude::*;
+use nu_errors::ShellError;
+use nu_protocol::{CallInfo, Signature, SyntaxShape, Value};
+use nu_source::Tagged;
 use std::path::PathBuf;
 
 pub struct Move;
@@ -20,19 +21,30 @@ impl PerItemCommand for Move {
 
     fn signature(&self) -> Signature {
         Signature::build("mv")
-            .required("source", SyntaxType::Path)
-            .required("destination", SyntaxType::Path)
-            .named("file", SyntaxType::Any)
+            .required(
+                "source",
+                SyntaxShape::Pattern,
+                "the location to move files/directories from",
+            )
+            .required(
+                "destination",
+                SyntaxShape::Path,
+                "the location to move files/directories to",
+            )
+    }
+
+    fn usage(&self) -> &str {
+        "Move files or directories."
     }
 
     fn run(
         &self,
         call_info: &CallInfo,
         _registry: &CommandRegistry,
-        shell_manager: &ShellManager,
-        _input: Tagged<Value>,
+        raw_args: &RawCommandArgs,
+        _input: Value,
     ) -> Result<OutputStream, ShellError> {
-        call_info.process(shell_manager, mv)?.run()
+        call_info.process(&raw_args.shell_manager, mv)?.run()
     }
 }
 

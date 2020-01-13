@@ -1,24 +1,40 @@
 use crate::commands::WholeStreamCommand;
-use crate::errors::ShellError;
 use crate::prelude::*;
+use nu_errors::ShellError;
+use nu_macros::signature;
+use nu_protocol::{Signature, SyntaxShape};
 
-pub struct CD;
+pub struct Cd;
 
-impl WholeStreamCommand for CD {
+impl WholeStreamCommand for Cd {
+    fn name(&self) -> &str {
+        "cd"
+    }
+
+    fn signature(&self) -> Signature {
+        signature! {
+            def cd {
+                "the directory to change to"
+                directory(optional Path) - "the directory to change to"
+            }
+        }
+        // Signature::build("cd").optional(
+        //     "directory",
+        //     SyntaxShape::Path,
+        //     "the directory to change to",
+        // )
+    }
+
+    fn usage(&self) -> &str {
+        "Change to a new path."
+    }
+
     fn run(
         &self,
         args: CommandArgs,
         registry: &CommandRegistry,
     ) -> Result<OutputStream, ShellError> {
         cd(args, registry)
-    }
-
-    fn name(&self) -> &str {
-        "cd"
-    }
-
-    fn signature(&self) -> Signature {
-        Signature::build("cd").optional("directory", SyntaxType::Path)
     }
 }
 

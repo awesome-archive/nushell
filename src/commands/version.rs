@@ -1,23 +1,12 @@
 use crate::commands::WholeStreamCommand;
-use crate::errors::ShellError;
-use crate::object::{Dictionary, Value};
-use crate::parser::registry::Signature;
 use crate::prelude::*;
 use indexmap::IndexMap;
-
-const VERSION: &'static str = env!("CARGO_PKG_VERSION");
+use nu_errors::ShellError;
+use nu_protocol::{Dictionary, Signature, UntaggedValue};
 
 pub struct Version;
 
 impl WholeStreamCommand for Version {
-    fn run(
-        &self,
-        args: CommandArgs,
-        registry: &CommandRegistry,
-    ) -> Result<OutputStream, ShellError> {
-        date(args, registry)
-    }
-
     fn name(&self) -> &str {
         "version"
     }
@@ -25,18 +14,30 @@ impl WholeStreamCommand for Version {
     fn signature(&self) -> Signature {
         Signature::build("version")
     }
+
+    fn usage(&self) -> &str {
+        "Display Nu version"
+    }
+
+    fn run(
+        &self,
+        args: CommandArgs,
+        registry: &CommandRegistry,
+    ) -> Result<OutputStream, ShellError> {
+        version(args, registry)
+    }
 }
 
-pub fn date(args: CommandArgs, registry: &CommandRegistry) -> Result<OutputStream, ShellError> {
+pub fn version(args: CommandArgs, registry: &CommandRegistry) -> Result<OutputStream, ShellError> {
     let args = args.evaluate_once(registry)?;
-    let span = args.call_info.name_span;
+    let tag = args.call_info.name_tag.clone();
 
     let mut indexmap = IndexMap::new();
     indexmap.insert(
         "version".to_string(),
-        Tagged::from_simple_spanned_item(Value::string(VERSION.to_string()), span),
+        UntaggedValue::string(clap::crate_version!()).into_value(&tag),
     );
 
-    let value = Tagged::from_simple_spanned_item(Value::Object(Dictionary::from(indexmap)), span);
+    let value = UntaggedValue::Row(Dictionary::from(indexmap)).into_value(&tag);
     Ok(OutputStream::one(value))
 }

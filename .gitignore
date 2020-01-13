@@ -1,4 +1,12 @@
 /target
+/scratch
 **/*.rs.bk
 history.txt
 tests/fixtures/nuplayground
+
+# Debian/Ubuntu
+debian/.debhelper/
+debian/debhelper-build-stamp
+debian/files
+debian/nu.substvars
+debian/nu/

@@ -1,7 +1,9 @@
 use crate::commands::command::RunnablePerItemContext;
-use crate::errors::ShellError;
-use crate::parser::registry::{CommandRegistry, Signature};
+use crate::context::CommandRegistry;
 use crate::prelude::*;
+use nu_errors::ShellError;
+use nu_protocol::{CallInfo, Signature, SyntaxShape, Value};
+use nu_source::Tagged;
 use std::path::PathBuf;
 
 pub struct Mkdir;
@@ -12,22 +14,26 @@ pub struct MkdirArgs {
 }
 
 impl PerItemCommand for Mkdir {
-    fn run(
-        &self,
-        call_info: &CallInfo,
-        _registry: &CommandRegistry,
-        shell_manager: &ShellManager,
-        _input: Tagged<Value>,
-    ) -> Result<OutputStream, ShellError> {
-        call_info.process(shell_manager, mkdir)?.run()
-    }
-
     fn name(&self) -> &str {
         "mkdir"
     }
 
     fn signature(&self) -> Signature {
-        Signature::build("mkdir").rest()
+        Signature::build("mkdir").rest(SyntaxShape::Path, "the name(s) of the path(s) to create")
+    }
+
+    fn usage(&self) -> &str {
+        "Make directories, creates intermediary directories as required."
+    }
+
+    fn run(
+        &self,
+        call_info: &CallInfo,
+        _registry: &CommandRegistry,
+        raw_args: &RawCommandArgs,
+        _input: Value,
+    ) -> Result<OutputStream, ShellError> {
+        call_info.process(&raw_args.shell_manager, mkdir)?.run()
     }
 }
 

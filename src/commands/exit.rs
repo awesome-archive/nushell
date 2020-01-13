@@ -1,25 +1,30 @@
-use crate::commands::command::{CommandAction, WholeStreamCommand};
-use crate::errors::ShellError;
-use crate::parser::registry::{CommandRegistry, Signature};
+use crate::commands::command::WholeStreamCommand;
+use crate::context::CommandRegistry;
 use crate::prelude::*;
+use nu_errors::ShellError;
+use nu_protocol::{CommandAction, ReturnSuccess, Signature};
 
 pub struct Exit;
 
 impl WholeStreamCommand for Exit {
+    fn name(&self) -> &str {
+        "exit"
+    }
+
+    fn signature(&self) -> Signature {
+        Signature::build("exit").switch("now", "exit out of the shell immediately")
+    }
+
+    fn usage(&self) -> &str {
+        "Exit the current shell (or all shells)"
+    }
+
     fn run(
         &self,
         args: CommandArgs,
         registry: &CommandRegistry,
     ) -> Result<OutputStream, ShellError> {
         exit(args, registry)
-    }
-
-    fn name(&self) -> &str {
-        "exit"
-    }
-
-    fn signature(&self) -> Signature {
-        Signature::build("exit").switch("now")
     }
 }
 

@@ -1,0 +1,42 @@
+[package]
+name = "nu-protocol"
+version = "0.8.0"
+authors = ["Yehuda Katz <wycats@gmail.com>", "Jonathan Turner <jonathan.d.turner@gmail.com>", "Andrés N. Robalino <andres@androbtech.com>"]
+edition = "2018"
+description = "Core values and protocols for Nushell"
+license = "MIT"
+
+[lib]
+doctest = false
+
+[dependencies]
+nu-source = { path = "../nu-source", version = "0.8.0" }
+nu-errors = { path = "../nu-errors", version = "0.8.0" }
+
+serde = { version = "1.0.103", features = ["derive"] }
+indexmap = { version = "1.3.0", features = ["serde-1"] }
+num-bigint = { version = "0.2.3", features = ["serde"] }
+bigdecimal = { version = "0.1.0", features = ["serde"] }
+chrono = { version = "0.4.10", features = ["serde"] }
+num-traits = "0.2.8"
+serde_bytes = "0.11.3"
+getset = "0.0.9"
+derive-new = "0.5.8"
+ansi_term = "0.12.1"
+language-reporting = "0.4.0"
+nom = "5.0.1"
+nom_locate = "1.0.0"
+nom-tracable = "0.4.1"
+typetag = "0.1.4"
+query_interface = "0.3.5"
+byte-unit = "3.0.3"
+natural = "0.3.0"
+
+# implement conversions
+subprocess = "0.1.18"
+serde_yaml = "0.8"
+toml = "0.5.5"
+serde_json = "1.0.44"
+
+[build-dependencies]
+nu-build = { version = "0.8.0", path = "../nu-build" }

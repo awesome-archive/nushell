@@ -1,70 +1,146 @@
-use crate::errors::ShellError;
-use crate::object::Value;
-use crate::prelude::*;
-
 use crate::commands::WholeStreamCommand;
-use crate::parser::registry::Signature;
+use crate::prelude::*;
+use indexmap::map::IndexMap;
+use nu_errors::ShellError;
+use nu_protocol::{Primitive, ReturnSuccess, Signature, SyntaxShape, UntaggedValue, Value};
+use nu_source::Tagged;
 
 pub struct Which;
 
 impl WholeStreamCommand for Which {
-    fn run(
-        &self,
-        args: CommandArgs,
-        registry: &CommandRegistry,
-    ) -> Result<OutputStream, ShellError> {
-        which(args, registry)
-    }
     fn name(&self) -> &str {
         "which"
     }
 
     fn signature(&self) -> Signature {
-        Signature::build("which").required("name", SyntaxType::Any)
+        Signature::build("which")
+            .required("application", SyntaxShape::String, "application")
+            .switch("all", "list all executables")
+    }
+
+    fn usage(&self) -> &str {
+        "Finds a program file."
+    }
+
+    fn run(
+        &self,
+        args: CommandArgs,
+        registry: &CommandRegistry,
+    ) -> Result<OutputStream, ShellError> {
+        args.process(registry, which)?.run()
     }
 }
 
-pub fn which(args: CommandArgs, registry: &CommandRegistry) -> Result<OutputStream, ShellError> {
-    let args = args.evaluate_once(registry)?;
+/// Shortcuts for creating an entry to the output table
+fn entry(arg: impl Into<String>, path: Value, builtin: bool, tag: Tag) -> Value {
+    let mut map = IndexMap::new();
+    map.insert(
+        "arg".to_string(),
+        UntaggedValue::Primitive(Primitive::String(arg.into())).into_value(tag.clone()),
+    );
+    map.insert("path".to_string(), path);
+    map.insert(
+        "builtin".to_string(),
+        UntaggedValue::Primitive(Primitive::Boolean(builtin)).into_value(tag.clone()),
+    );
 
-    let mut which_out = VecDeque::new();
-    let span = args.call_info.name_span;
+    UntaggedValue::row(map).into_value(tag)
+}
 
-    if let Some(v) = &args.call_info.args.positional {
-        if v.len() > 0 {
-            match &v[0] {
-                Tagged {
-                    item: Value::Primitive(Primitive::String(s)),
-                    tag,
-                } => match which::which(&s) {
-                    Ok(ok) => {
-                        which_out
-                            .push_back(Value::Primitive(Primitive::Path(ok)).tagged(tag.clone()));
-                    }
-                    _ => {}
-                },
-                Tagged { tag, .. } => {
-                    return Err(ShellError::labeled_error(
-                        "Expected a filename to find",
-                        "needs a filename",
-                        tag.span,
-                    ));
+macro_rules! entry_builtin {
+    ($arg:expr, $tag:expr) => {
+        entry(
+            $arg.clone(),
+            UntaggedValue::Primitive(Primitive::String("nushell built-in command".to_string()))
+                .into_value($tag.clone()),
+            true,
+            $tag,
+        )
+    };
+}
+
+macro_rules! entry_path {
+    ($arg:expr, $path:expr, $tag:expr) => {
+        entry(
+            $arg.clone(),
+            UntaggedValue::Primitive(Primitive::Path($path)).into_value($tag.clone()),
+            false,
+            $tag,
+        )
+    };
+}
+
+#[derive(Deserialize, Debug)]
+struct WhichArgs {
+    application: Tagged<String>,
+    all: bool,
+}
+
+fn which(
+    WhichArgs { application, all }: WhichArgs,
+    RunnableContext { commands, .. }: RunnableContext,
+) -> Result<OutputStream, ShellError> {
+    let external = application.starts_with('^');
+    let item = if external {
+        application.item[1..].to_string()
+    } else {
+        application.item.clone()
+    };
+
+    if all {
+        let stream = async_stream! {
+            if external {
+                if let Ok(path) = ichwh::which(&item).await {
+                    yield ReturnSuccess::value(entry_path!(item, path.into(), application.tag.clone()));
                 }
             }
-        } else {
-            return Err(ShellError::labeled_error(
-                "Expected a binary to find",
-                "needs application name",
-                span,
-            ));
-        }
-    } else {
-        return Err(ShellError::labeled_error(
-            "Expected a binary to find",
-            "needs application name",
-            span,
-        ));
-    }
 
-    Ok(which_out.to_output_stream())
+            let builtin = commands.has(&item)?;
+            if builtin {
+                yield ReturnSuccess::value(entry_builtin!(item, application.tag.clone()));
+            }
+
+            if let Ok(paths) = ichwh::which_all(&item).await {
+                if !builtin && paths.len() == 0 {
+                    yield Err(ShellError::labeled_error(
+                        "Binary not found for argument, and argument is not a builtin",
+                        "not found",
+                        &application.tag,
+                    ));
+                } else {
+                    for path in paths {
+                        yield ReturnSuccess::value(entry_path!(item, path.into(), application.tag.clone()));
+                    }
+                }
+            } else {
+                yield Err(ShellError::labeled_error(
+                    "Error trying to find binary for argument",
+                    "error",
+                    &application.tag,
+                ));
+            }
+        };
+
+        Ok(stream.to_output_stream())
+    } else {
+        let stream = async_stream! {
+            if external {
+                if let Ok(path) = ichwh::which(&item).await {
+                    yield ReturnSuccess::value(entry_path!(item, path.into(), application.tag.clone()));
+                }
+            } else if commands.has(&item)? {
+                yield ReturnSuccess::value(entry_builtin!(item, application.tag.clone()));
+            } else if let Ok(path) = ichwh::which(&item).await {
+                yield ReturnSuccess::value(entry_path!(item, path.into(), application.tag.clone()));
+            } else {
+                yield Err(ShellError::labeled_error(
+                    "Binary not found for argument, and argument is not a builtin",
+                    "not found",
+                    &application.tag,
+                ));
+            }
+        };
+
+        Ok(stream.to_output_stream())
+    }
 }

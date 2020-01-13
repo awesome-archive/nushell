@@ -3,45 +3,58 @@ use crate::commands::cp::CopyArgs;
 use crate::commands::mkdir::MkdirArgs;
 use crate::commands::mv::MoveArgs;
 use crate::commands::rm::RemoveArgs;
-use crate::context::SourceMap;
 use crate::prelude::*;
 use crate::shell::shell::Shell;
+use crate::utils::ValueStructure;
+use nu_errors::ShellError;
+use nu_protocol::{ReturnSuccess, ShellTypeName, UntaggedValue, Value};
+use nu_source::Tagged;
 use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ValueShell {
-    crate path: String,
-    crate value: Tagged<Value>,
+    pub(crate) path: String,
+    pub(crate) last_path: String,
+    pub(crate) value: Value,
+}
+
+impl std::fmt::Debug for ValueShell {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ValueShell @ {}", self.path)
+    }
 }
 
 impl ValueShell {
-    pub fn new(value: Tagged<Value>) -> ValueShell {
+    pub fn new(value: Value) -> ValueShell {
         ValueShell {
             path: "/".to_string(),
+            last_path: "/".to_string(),
             value,
         }
     }
-    fn members(&self) -> VecDeque<Tagged<Value>> {
+
+    fn members_under(&self, path: &Path) -> VecDeque<Value> {
         let mut shell_entries = VecDeque::new();
-        let full_path = PathBuf::from(&self.path);
+        let full_path = path.to_path_buf();
         let mut viewed = self.value.clone();
         let sep_string = std::path::MAIN_SEPARATOR.to_string();
         let sep = OsStr::new(&sep_string);
         for p in full_path.iter() {
             match p {
                 x if x == sep => {}
-                step => match viewed.get_data_by_key(step.to_str().unwrap()) {
-                    Some(v) => {
+                step => {
+                    let name: &str = &step.to_string_lossy().to_string();
+                    let value = viewed.get_data_by_key(name.spanned_unknown());
+                    if let Some(v) = value {
                         viewed = v.clone();
                     }
-                    _ => {}
-                },
+                }
             }
         }
         match viewed {
-            Tagged {
-                item: Value::List(l),
+            Value {
+                value: UntaggedValue::Table(l),
                 ..
             } => {
                 for item in l {
@@ -49,61 +62,122 @@ impl ValueShell {
                 }
             }
             x => {
-                shell_entries.push_back(x.clone());
+                shell_entries.push_back(x);
             }
         }
 
         shell_entries
     }
+
+    fn members(&self) -> VecDeque<Value> {
+        self.members_under(Path::new("."))
+    }
 }
 
 impl Shell for ValueShell {
-    fn name(&self, source_map: &SourceMap) -> String {
-        let origin_name = self.value.origin_name(source_map);
-        format!(
-            "{}",
-            match origin_name {
-                Some(x) => format!("{{{}}}", x),
-                None => format!("<{}>", self.value.item.type_name(),),
-            }
-        )
+    fn name(&self) -> String {
+        let anchor_name = self.value.anchor_name();
+
+        match anchor_name {
+            Some(x) => format!("{{{}}}", x),
+            None => format!("<{}>", self.value.type_name()),
+        }
     }
 
-    fn ls(&self, _args: EvaluatedWholeStreamCommandArgs) -> Result<OutputStream, ShellError> {
+    fn homedir(&self) -> Option<PathBuf> {
+        Some(PathBuf::from("/"))
+    }
+
+    fn ls(
+        &self,
+        target: Option<Tagged<PathBuf>>,
+        context: &RunnableContext,
+        _full: bool,
+    ) -> Result<OutputStream, ShellError> {
+        let mut full_path = PathBuf::from(self.path());
+        let name_tag = context.name.clone();
+
+        if let Some(value) = &target {
+            full_path.push(value.as_ref());
+        }
+
+        let mut value_system = ValueStructure::new();
+        value_system.walk_decorate(&self.value)?;
+
+        if !value_system.exists(&full_path) {
+            if let Some(target) = &target {
+                return Err(ShellError::labeled_error(
+                    "Can not list entries inside",
+                    "No such path exists",
+                    target.tag(),
+                ));
+            }
+
+            return Err(ShellError::labeled_error(
+                "Can not list entries inside",
+                "No such path exists",
+                name_tag,
+            ));
+        }
+
         Ok(self
-            .members()
-            .map(|x| ReturnSuccess::value(x))
+            .members_under(full_path.as_path())
+            .map(ReturnSuccess::value)
             .to_output_stream())
     }
 
     fn cd(&self, args: EvaluatedWholeStreamCommandArgs) -> Result<OutputStream, ShellError> {
-        let path = match args.nth(0) {
+        let destination = args.nth(0);
+
+        let path = match destination {
             None => "/".to_string(),
             Some(v) => {
-                let target = v.as_string()?;
+                let target = v.as_path()?;
 
                 let mut cwd = PathBuf::from(&self.path);
-                match target {
-                    x if x == ".." => {
-                        cwd.pop();
+
+                if target == PathBuf::from("..") {
+                    cwd.pop();
+                } else if target == PathBuf::from("-") {
+                    cwd = PathBuf::from(&self.last_path);
+                } else {
+                    match target.to_str() {
+                        Some(target) => match target.chars().nth(0) {
+                            Some(x) if x == '/' => cwd = PathBuf::from(target),
+                            _ => cwd.push(target),
+                        },
+                        None => cwd.push(target),
                     }
-                    _ => match target.chars().nth(0) {
-                        Some(x) if x == '/' => cwd = PathBuf::from(target),
-                        _ => {
-                            cwd.push(target);
-                        }
-                    },
                 }
                 cwd.to_string_lossy().to_string()
             }
         };
+
+        let mut value_system = ValueStructure::new();
+        value_system.walk_decorate(&self.value)?;
+
+        if !value_system.exists(&PathBuf::from(&path)) {
+            if let Some(destination) = destination {
+                return Err(ShellError::labeled_error(
+                    "Can not change to path inside",
+                    "No such path exists",
+                    destination.tag(),
+                ));
+            }
+
+            return Err(ShellError::labeled_error(
+                "Can not change to path inside",
+                "No such path exists",
+                &args.call_info.name_tag,
+            ));
+        }
 
         let mut stream = VecDeque::new();
         stream.push_back(ReturnSuccess::change_cwd(path));
         Ok(stream.into())
     }
 
-    fn cp(&self, _args: CopyArgs, name: Span, _path: &str) -> Result<OutputStream, ShellError> {
+    fn cp(&self, _args: CopyArgs, name: Tag, _path: &str) -> Result<OutputStream, ShellError> {
         Err(ShellError::labeled_error(
             "cp not currently supported on values",
             "not currently supported",
@@ -111,7 +185,7 @@ impl Shell for ValueShell {
         ))
     }
 
-    fn mv(&self, _args: MoveArgs, name: Span, _path: &str) -> Result<OutputStream, ShellError> {
+    fn mv(&self, _args: MoveArgs, name: Tag, _path: &str) -> Result<OutputStream, ShellError> {
         Err(ShellError::labeled_error(
             "mv not currently supported on values",
             "not currently supported",
@@ -119,7 +193,7 @@ impl Shell for ValueShell {
         ))
     }
 
-    fn mkdir(&self, _args: MkdirArgs, name: Span, _path: &str) -> Result<OutputStream, ShellError> {
+    fn mkdir(&self, _args: MkdirArgs, name: Tag, _path: &str) -> Result<OutputStream, ShellError> {
         Err(ShellError::labeled_error(
             "mkdir not currently supported on values",
             "not currently supported",
@@ -127,7 +201,7 @@ impl Shell for ValueShell {
         ))
     }
 
-    fn rm(&self, _args: RemoveArgs, name: Span, _path: &str) -> Result<OutputStream, ShellError> {
+    fn rm(&self, _args: RemoveArgs, name: Tag, _path: &str) -> Result<OutputStream, ShellError> {
         Err(ShellError::labeled_error(
             "rm not currently supported on values",
             "not currently supported",
@@ -139,9 +213,17 @@ impl Shell for ValueShell {
         self.path.clone()
     }
 
+    fn pwd(&self, args: EvaluatedWholeStreamCommandArgs) -> Result<OutputStream, ShellError> {
+        let mut stream = VecDeque::new();
+        stream.push_back(ReturnSuccess::value(
+            UntaggedValue::string(self.path()).into_value(&args.call_info.name_tag),
+        ));
+        Ok(stream.into())
+    }
+
     fn set_path(&mut self, path: String) {
-        let _ = std::env::set_current_dir(&path);
-        self.path = path.clone();
+        self.last_path = self.path.clone();
+        self.path = path;
     }
 
     fn complete(
@@ -156,8 +238,8 @@ impl Shell for ValueShell {
         let members = self.members();
         for member in members {
             match member {
-                Tagged { item, .. } => {
-                    for desc in item.data_descriptors() {
+                Value { value, .. } => {
+                    for desc in value.data_descriptors() {
                         possible_completion.push(desc);
                     }
                 }

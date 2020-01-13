@@ -1,12 +1,14 @@
 use crate::commands::WholeStreamCommand;
-use crate::errors::ShellError;
 use crate::prelude::*;
+use log::trace;
+use nu_errors::ShellError;
+use nu_protocol::{Evaluate, Scope, Signature, SyntaxShape};
 
 pub struct SkipWhile;
 
 #[derive(Deserialize)]
 pub struct SkipWhileArgs {
-    condition: value::Block,
+    condition: Evaluate,
 }
 
 impl WholeStreamCommand for SkipWhile {
@@ -16,8 +18,16 @@ impl WholeStreamCommand for SkipWhile {
 
     fn signature(&self) -> Signature {
         Signature::build("skip-while")
-            .required("condition", SyntaxType::Block)
+            .required(
+                "condition",
+                SyntaxShape::Block,
+                "the condition that must be met to continue skipping",
+            )
             .filter()
+    }
+
+    fn usage(&self) -> &str {
+        "Skips rows while the condition matches."
     }
 
     fn run(
@@ -34,10 +44,12 @@ pub fn skip_while(
     RunnableContext { input, .. }: RunnableContext,
 ) -> Result<OutputStream, ShellError> {
     let objects = input.values.skip_while(move |item| {
-        let result = condition.invoke(&item);
+        trace!("ITEM = {:?}", item);
+        let result = condition.invoke(&Scope::new(item.clone()));
+        trace!("RESULT = {:?}", result);
 
         let return_value = match result {
-            Ok(v) if v.is_true() => true,
+            Ok(ref v) if v.is_true() => true,
             _ => false,
         };
 

@@ -1,8 +1,9 @@
 use crate::commands::command::RunnablePerItemContext;
-use crate::errors::ShellError;
-use crate::parser::hir::SyntaxType;
-use crate::parser::registry::{CommandRegistry, Signature};
+use crate::context::CommandRegistry;
 use crate::prelude::*;
+use nu_errors::ShellError;
+use nu_protocol::{CallInfo, Signature, SyntaxShape, Value};
+use nu_source::Tagged;
 use std::path::PathBuf;
 
 pub struct Cpy;
@@ -15,26 +16,29 @@ pub struct CopyArgs {
 }
 
 impl PerItemCommand for Cpy {
-    fn run(
-        &self,
-        call_info: &CallInfo,
-        _registry: &CommandRegistry,
-        shell_manager: &ShellManager,
-        _input: Tagged<Value>,
-    ) -> Result<OutputStream, ShellError> {
-        call_info.process(shell_manager, cp)?.run()
-    }
-
     fn name(&self) -> &str {
         "cp"
     }
 
     fn signature(&self) -> Signature {
         Signature::build("cp")
-            .required("src", SyntaxType::Path)
-            .required("dst", SyntaxType::Path)
-            .named("file", SyntaxType::Any)
-            .switch("recursive")
+            .required("src", SyntaxShape::Pattern, "the place to copy from")
+            .required("dst", SyntaxShape::Path, "the place to copy to")
+            .switch("recursive", "copy recursively through subdirectories")
+    }
+
+    fn usage(&self) -> &str {
+        "Copy files."
+    }
+
+    fn run(
+        &self,
+        call_info: &CallInfo,
+        _registry: &CommandRegistry,
+        raw_args: &RawCommandArgs,
+        _input: Value,
+    ) -> Result<OutputStream, ShellError> {
+        call_info.process(&raw_args.shell_manager, cp)?.run()
     }
 }
 

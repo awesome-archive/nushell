@@ -1,58 +1,60 @@
 use crate::commands::WholeStreamCommand;
-use crate::errors::ShellError;
-use crate::parser::CommandRegistry;
+use crate::context::CommandRegistry;
 use crate::prelude::*;
+use nu_errors::ShellError;
+use nu_protocol::{ReturnSuccess, Signature, SyntaxShape, Value};
+use nu_source::Tagged;
 
 pub struct Last;
 
-impl WholeStreamCommand for Last {
-    fn run(
-        &self,
-        args: CommandArgs,
-        registry: &CommandRegistry,
-    ) -> Result<OutputStream, ShellError> {
-        last(args, registry)
-    }
+#[derive(Deserialize)]
+pub struct LastArgs {
+    rows: Option<Tagged<u64>>,
+}
 
+impl WholeStreamCommand for Last {
     fn name(&self) -> &str {
         "last"
     }
 
     fn signature(&self) -> Signature {
-        Signature::build("last").required("amount", SyntaxType::Literal)
+        Signature::build("last").optional(
+            "rows",
+            SyntaxShape::Number,
+            "starting from the back, the number of rows to return",
+        )
+    }
+
+    fn usage(&self) -> &str {
+        "Show only the last number of rows."
+    }
+
+    fn run(
+        &self,
+        args: CommandArgs,
+        registry: &CommandRegistry,
+    ) -> Result<OutputStream, ShellError> {
+        args.process(registry, last)?.run()
     }
 }
 
-fn last(args: CommandArgs, registry: &CommandRegistry) -> Result<OutputStream, ShellError> {
-    let args = args.evaluate_once(registry)?;
+fn last(LastArgs { rows }: LastArgs, context: RunnableContext) -> Result<OutputStream, ShellError> {
+    let stream = async_stream! {
+        let v: Vec<_> = context.input.into_vec().await;
 
-    let amount = args.expect_nth(0)?.as_i64();
+        let rows_desired = if let Some(quantity) = rows {
+            *quantity
+        } else {
+         1
+        };
 
-    let amount = match amount {
-        Ok(o) => o,
-        Err(_) => {
-            return Err(ShellError::labeled_error(
-                "Value is not a number",
-                "expected integer",
-                args.expect_nth(0)?.span(),
-            ))
-        }
-    };
-
-    if amount <= 0 {
-        return Err(ShellError::labeled_error(
-            "Value is too low",
-            "expected a positive integer",
-            args.expect_nth(0)?.span(),
-        ))
-    }
-
-    let stream = async_stream_block! {
-        let v: Vec<_> = args.input.into_vec().await;
-        let k = v.len() - (amount as usize);
-        for x in v[k..].iter() {
-            let y: Tagged<Value> = x.clone();
-            yield ReturnSuccess::value(y)
+        let count = (rows_desired as usize);
+        if count < v.len() {
+            let k = v.len() - count;
+            for x in v[k..].iter() {
+                let y: Value = x.clone();
+                yield ReturnSuccess::value(y)
+            }
         }
     };
     Ok(stream.to_output_stream())

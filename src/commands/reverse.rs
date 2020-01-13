@@ -1,25 +1,30 @@
 use crate::commands::WholeStreamCommand;
-use crate::errors::ShellError;
-use crate::parser::CommandRegistry;
+use crate::context::CommandRegistry;
 use crate::prelude::*;
+use nu_errors::ShellError;
+use nu_protocol::Signature;
 
 pub struct Reverse;
 
 impl WholeStreamCommand for Reverse {
-    fn run(
-        &self,
-        args: CommandArgs,
-        registry: &CommandRegistry,
-    ) -> Result<OutputStream, ShellError> {
-        reverse(args, registry)
-    }
-
     fn name(&self) -> &str {
         "reverse"
     }
 
     fn signature(&self) -> Signature {
         Signature::build("reverse")
+    }
+
+    fn usage(&self) -> &str {
+        "Reverses the table."
+    }
+
+    fn run(
+        &self,
+        args: CommandArgs,
+        registry: &CommandRegistry,
+    ) -> Result<OutputStream, ShellError> {
+        reverse(args, registry)
     }
 }
 

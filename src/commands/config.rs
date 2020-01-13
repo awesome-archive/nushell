@@ -1,17 +1,19 @@
-use crate::prelude::*;
-
 use crate::commands::WholeStreamCommand;
-use crate::errors::ShellError;
-use crate::object::{config, Value};
-use crate::parser::hir::SyntaxType;
-use crate::parser::registry::{self};
-use std::iter::FromIterator;
+use crate::context::CommandRegistry;
+use crate::data::config;
+use crate::prelude::*;
+use nu_errors::ShellError;
+use nu_protocol::{Primitive, ReturnSuccess, Signature, SyntaxShape, UntaggedValue, Value};
+use nu_source::Tagged;
+use std::path::PathBuf;
 
 pub struct Config;
 
 #[derive(Deserialize)]
 pub struct ConfigArgs {
-    set: Option<(Tagged<String>, Tagged<Value>)>,
+    load: Option<Tagged<PathBuf>>,
+    set: Option<(Tagged<String>, Value)>,
+    set_into: Option<Tagged<String>>,
     get: Option<Tagged<String>>,
     clear: Tagged<bool>,
     remove: Option<Tagged<String>>,
@@ -25,17 +27,35 @@ impl WholeStreamCommand for Config {
 
     fn signature(&self) -> Signature {
         Signature::build("config")
-            .named("set", SyntaxType::Any)
-            .named("get", SyntaxType::Any)
-            .named("remove", SyntaxType::Any)
-            .switch("clear")
-            .switch("path")
+            .named(
+                "load",
+                SyntaxShape::Path,
+                "load the config from the path give",
+            )
+            .named(
+                "set",
+                SyntaxShape::Any,
+                "set a value in the config, eg) --set [key value]",
+            )
+            .named(
+                "set_into",
+                SyntaxShape::Member,
+                "sets a variable from values in the pipeline",
+            )
+            .named("get", SyntaxShape::Any, "get a value from the config")
+            .named("remove", SyntaxShape::Any, "remove a value from the config")
+            .switch("clear", "clear the config")
+            .switch("path", "return the path to the config file")
+    }
+
+    fn usage(&self) -> &str {
+        "Configuration management."
     }
 
     fn run(
         &self,
         args: CommandArgs,
-        registry: &registry::CommandRegistry,
+        registry: &CommandRegistry,
     ) -> Result<OutputStream, ShellError> {
         args.process(registry, config)?.run()
     }
@@ -43,84 +63,113 @@ impl WholeStreamCommand for Config {
 
 pub fn config(
     ConfigArgs {
+        load,
         set,
+        set_into,
         get,
         clear,
         remove,
         path,
     }: ConfigArgs,
-    RunnableContext { name, .. }: RunnableContext,
+    RunnableContext { name, input, .. }: RunnableContext,
 ) -> Result<OutputStream, ShellError> {
-    let mut result = crate::object::config::config(name)?;
+    let name_span = name.clone();
 
-    if let Some(v) = get {
-        let key = v.to_string();
-        let value = result
-            .get(&key)
-            .ok_or_else(|| ShellError::string(&format!("Missing key {} in config", key)))?;
-
-        return Ok(
-            stream![value.clone()].into(), // futures::stream::once(futures::future::ready(ReturnSuccess::Value(value.clone()))).into(),
-        );
-    }
-
-    if let Some((key, value)) = set {
-        result.insert(key.to_string(), value.clone());
-
-        config::write_config(&result)?;
-
-        return Ok(stream![Tagged::from_simple_spanned_item(
-            Value::Object(result.into()),
-            value.span()
-        )]
-        .from_input_stream());
-    }
-
-    if let Tagged {
-        item: true,
-        tag: Tag { span, .. },
-    } = clear
-    {
-        result.clear();
-
-        config::write_config(&result)?;
-
-        return Ok(stream![Tagged::from_simple_spanned_item(
-            Value::Object(result.into()),
-            span
-        )]
-        .from_input_stream());
-    }
-
-    if let Tagged {
-        item: true,
-        tag: Tag { span, .. },
-    } = path
-    {
-        let path = config::config_path()?;
-
-        return Ok(stream![Tagged::from_simple_spanned_item(
-            Value::Primitive(Primitive::Path(path)),
-            span
-        )]
-        .from_input_stream());
-    }
-
-    if let Some(v) = remove {
-        let key = v.to_string();
-
-        if result.contains_key(&key) {
-            result.remove(&key);
+    let stream = async_stream! {
+        let configuration = if let Some(supplied) = load {
+            Some(supplied.item().clone())
         } else {
-            return Err(ShellError::string(&format!(
-                "{} does not exist in config",
-                key
-            )));
+            None
+        };
+
+        let mut result = crate::data::config::read(name_span, &configuration)?;
+
+        if let Some(v) = get {
+            let key = v.to_string();
+            let value = result
+                .get(&key)
+                .ok_or_else(|| ShellError::labeled_error("Missing key in config", "key", v.tag()))?;
+
+            match value {
+                Value {
+                    value: UntaggedValue::Table(list),
+                    ..
+                } => {
+                    for l in list {
+                        let value = l.clone();
+                        yield ReturnSuccess::value(l.clone());
+                    }
+                }
+                x => yield ReturnSuccess::value(x.clone()),
+            }
         }
+        else if let Some((key, value)) = set {
+            result.insert(key.to_string(), value.clone());
 
-        let obj = VecDeque::from_iter(vec![Value::Object(result.into()).simple_spanned(v.span())]);
-        return Ok(obj.from_input_stream());
-    }
+            config::write(&result, &configuration)?;
 
-    return Ok(vec![Value::Object(result.into()).simple_spanned(name)].into());
+            yield ReturnSuccess::value(UntaggedValue::Row(result.into()).into_value(&value.tag));
+        }
+        else if let Some(v) = set_into {
+            let rows: Vec<Value> = input.values.collect().await;
+            let key = v.to_string();
+
+            if rows.len() == 0 {
+                yield Err(ShellError::labeled_error("No values given for set_into", "needs value(s) from pipeline", v.tag()));
+            } else if rows.len() == 1 {
+                // A single value
+                let value = &rows[0];
+
+                result.insert(key.to_string(), value.clone());
+
+                config::write(&result, &configuration)?;
+
+                yield ReturnSuccess::value(UntaggedValue::Row(result.into()).into_value(name));
+            } else {
+                // Take in the pipeline as a table
+                let value = UntaggedValue::Table(rows).into_value(name.clone());
+
+                result.insert(key.to_string(), value.clone());
+
+                config::write(&result, &configuration)?;
+
+                yield ReturnSuccess::value(UntaggedValue::Row(result.into()).into_value(name));
+            }
+        }
+        else if let Tagged { item: true, tag } = clear {
+            result.clear();
+
+            config::write(&result, &configuration)?;
+
+            yield ReturnSuccess::value(UntaggedValue::Row(result.into()).into_value(tag));
+
+            return;
+        }
+        else if let Tagged { item: true, tag } = path {
+            let path = config::default_path_for(&configuration)?;
+
+            yield ReturnSuccess::value(UntaggedValue::Primitive(Primitive::Path(path)).into_value(tag));
+        }
+        else if let Some(v) = remove {
+            let key = v.to_string();
+
+            if result.contains_key(&key) {
+                result.swap_remove(&key);
+                config::write(&result, &configuration)?
+            } else {
+                yield Err(ShellError::labeled_error(
+                    "Key does not exist in config",
+                    "key",
+                    v.tag(),
+                ));
+            }
+
+            yield ReturnSuccess::value(UntaggedValue::Row(result.into()).into_value(v.tag()));
+        }
+        else {
+            yield ReturnSuccess::value(UntaggedValue::Row(result.into()).into_value(name));
+        }
+    };
+
+    Ok(stream.to_output_stream())
 }

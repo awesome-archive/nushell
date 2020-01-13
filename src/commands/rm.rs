@@ -1,8 +1,9 @@
 use crate::commands::command::RunnablePerItemContext;
-use crate::errors::ShellError;
-use crate::parser::hir::SyntaxType;
-use crate::parser::registry::{CommandRegistry, Signature};
+use crate::context::CommandRegistry;
 use crate::prelude::*;
+use nu_errors::ShellError;
+use nu_protocol::{CallInfo, Signature, SyntaxShape, Value};
+use nu_source::Tagged;
 use std::path::PathBuf;
 
 pub struct Remove;
@@ -11,6 +12,7 @@ pub struct Remove;
 pub struct RemoveArgs {
     pub target: Tagged<PathBuf>,
     pub recursive: Tagged<bool>,
+    pub trash: Tagged<bool>,
 }
 
 impl PerItemCommand for Remove {
@@ -20,18 +22,26 @@ impl PerItemCommand for Remove {
 
     fn signature(&self) -> Signature {
         Signature::build("rm")
-            .required("path", SyntaxType::Path)
-            .switch("recursive")
+            .required("path", SyntaxShape::Pattern, "the file path to remove")
+            .switch(
+                "trash",
+                "use the platform's recycle bin instead of permanently deleting",
+            )
+            .switch("recursive", "delete subdirectories recursively")
+    }
+
+    fn usage(&self) -> &str {
+        "Remove a file"
     }
 
     fn run(
         &self,
         call_info: &CallInfo,
         _registry: &CommandRegistry,
-        shell_manager: &ShellManager,
-        _input: Tagged<Value>,
+        raw_args: &RawCommandArgs,
+        _input: Value,
     ) -> Result<OutputStream, ShellError> {
-        call_info.process(shell_manager, rm)?.run()
+        call_info.process(&raw_args.shell_manager, rm)?.run()
     }
 }
 

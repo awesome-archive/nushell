@@ -1,14 +1,85 @@
-use crate::commands::to_csv::{to_string as to_csv_to_string, value_to_csv_value};
-use crate::commands::to_json::value_to_json_value;
-use crate::commands::to_toml::value_to_toml_value;
-use crate::commands::to_yaml::value_to_yaml_value;
-use crate::commands::WholeStreamCommand;
-use crate::errors::ShellError;
-use crate::object::Value;
+use crate::commands::{UnevaluatedCallInfo, WholeStreamCommand};
 use crate::prelude::*;
+use nu_errors::ShellError;
+use nu_protocol::{Primitive, ReturnSuccess, Signature, SyntaxShape, UntaggedValue, Value};
+use nu_source::Tagged;
 use std::path::{Path, PathBuf};
 
 pub struct Save;
+
+macro_rules! process_string {
+    ($scope:tt, $input:ident, $name_tag:ident) => {{
+        let mut result_string = String::new();
+        for res in $input {
+            match res {
+                Value {
+                    value: UntaggedValue::Primitive(Primitive::String(s)),
+                    ..
+                } => {
+                    result_string.push_str(&s);
+                }
+                _ => {
+                    break $scope Err(ShellError::labeled_error(
+                        "Save requires string data",
+                        "consider converting data to string (see `help commands`)",
+                        $name_tag,
+                    ));
+                }
+            }
+        }
+        Ok(result_string.into_bytes())
+    }};
+}
+
+macro_rules! process_string_return_success {
+    ($scope:tt, $result_vec:ident, $name_tag:ident) => {{
+        let mut result_string = String::new();
+        for res in $result_vec {
+            match res {
+                Ok(ReturnSuccess::Value(Value {
+                    value: UntaggedValue::Primitive(Primitive::String(s)),
+                    ..
+                })) => {
+                    result_string.push_str(&s);
+                }
+                _ => {
+                    break $scope Err(ShellError::labeled_error(
+                        "Save could not successfully save",
+                        "unexpected data during text save",
+                        $name_tag,
+                    ));
+                }
+            }
+        }
+        Ok(result_string.into_bytes())
+    }};
+}
+
+macro_rules! process_binary_return_success {
+    ($scope:tt, $result_vec:ident, $name_tag:ident) => {{
+        let mut result_binary: Vec<u8> = Vec::new();
+        for res in $result_vec {
+            match res {
+                Ok(ReturnSuccess::Value(Value {
+                    value: UntaggedValue::Primitive(Primitive::Binary(b)),
+                    ..
+                })) => {
+                    for u in b.into_iter() {
+                        result_binary.push(u);
+                    }
+                }
+                _ => {
+                    break $scope Err(ShellError::labeled_error(
+                        "Save could not successfully save",
+                        "unexpected data during binary save",
+                        $name_tag,
+                    ));
+                }
+            }
+        }
+        Ok(result_binary)
+    }};
+}
 
 #[derive(Deserialize)]
 pub struct SaveArgs {
@@ -23,8 +94,15 @@ impl WholeStreamCommand for Save {
 
     fn signature(&self) -> Signature {
         Signature::build("save")
-            .optional("path", SyntaxType::Path)
-            .switch("raw")
+            .optional("path", SyntaxShape::Path, "the path to save contents to")
+            .switch(
+                "raw",
+                "treat values as-is rather than auto-converting based on file extension",
+            )
+    }
+
+    fn usage(&self) -> &str {
+        "Save the contents of the pipeline to a file."
     }
 
     fn run(
@@ -32,7 +110,7 @@ impl WholeStreamCommand for Save {
         args: CommandArgs,
         registry: &CommandRegistry,
     ) -> Result<OutputStream, ShellError> {
-        args.process(registry, save)?.run()
+        Ok(args.process_raw(registry, save)?.run())
     }
 }
 
@@ -45,30 +123,32 @@ fn save(
         input,
         name,
         shell_manager,
-        source_map,
+        host,
+        ctrl_c,
+        commands: registry,
         ..
     }: RunnableContext,
+    raw_args: RawCommandArgs,
 ) -> Result<OutputStream, ShellError> {
-    let mut full_path = PathBuf::from(shell_manager.path());
-    let name_span = name;
+    let mut full_path = PathBuf::from(shell_manager.path()?);
+    let name_tag = name.clone();
 
-    if path.is_none() {
-        let source_map = source_map.clone();
-        let stream = async_stream_block! {
-            let input: Vec<Tagged<Value>> = input.values.collect().await;
-            // If there is no filename, check the metadata for the origin filename
+    let stream = async_stream! {
+        let input: Vec<Value> = input.values.collect().await;
+        if path.is_none() {
+            // If there is no filename, check the metadata for the anchor filename
             if input.len() > 0 {
-                let origin = input[0].origin();
-                match origin.map(|x| source_map.get(&x)).flatten() {
+                let anchor = input[0].tag.anchor();
+                match anchor {
                     Some(path) => match path {
-                        SpanSource::File(file) => {
-                            full_path.push(Path::new(file));
+                        AnchorLocation::File(file) => {
+                            full_path.push(Path::new(&file));
                         }
                         _ => {
                             yield Err(ShellError::labeled_error(
                                 "Save requires a filepath",
                                 "needs path",
-                                name_span,
+                                name_tag.clone(),
                             ));
                         }
                     },
@@ -76,7 +156,7 @@ fn save(
                         yield Err(ShellError::labeled_error(
                             "Save requires a filepath",
                             "needs path",
-                            name_span,
+                            name_tag.clone(),
                         ));
                     }
                 }
@@ -84,59 +164,72 @@ fn save(
                 yield Err(ShellError::labeled_error(
                     "Save requires a filepath",
                     "needs path",
-                    name_span,
+                    name_tag.clone(),
                 ));
             }
-
-            let content = if !save_raw {
-                to_string_for(full_path.extension(), &input)
-            } else {
-                string_from(&input)
-            };
-
-            match content {
-                Ok(save_data) => match std::fs::write(full_path, save_data) {
-                    Ok(o) => o,
-                    Err(e) => yield Err(ShellError::string(e.to_string())),
-                },
-                Err(e) => yield Err(ShellError::string(e.to_string())),
+        } else {
+            if let Some(file) = path {
+                full_path.push(file.item());
             }
-
-        };
-
-        Ok(OutputStream::new(stream))
-    } else {
-        if let Some(file) = path {
-            full_path.push(file.item());
         }
 
-        let stream = async_stream_block! {
-            let input: Vec<Tagged<Value>> = input.values.collect().await;
-
-            let content = if !save_raw {
-                to_string_for(full_path.extension(), &input)
+        // TODO use label_break_value once it is stable:
+        // https://github.com/rust-lang/rust/issues/48594
+        let content : Result<Vec<u8>, ShellError> = 'scope: loop {
+            break if !save_raw {
+                if let Some(extension) = full_path.extension() {
+                    let command_name = format!("to-{}", extension.to_string_lossy());
+                    if let Some(converter) = registry.get_command(&command_name)? {
+                        let new_args = RawCommandArgs {
+                            host,
+                            ctrl_c,
+                            shell_manager,
+                            call_info: UnevaluatedCallInfo {
+                                args: nu_parser::hir::Call {
+                                    head: raw_args.call_info.args.head,
+                                    positional: None,
+                                    named: None,
+                                    span: Span::unknown()
+                                },
+                                source: raw_args.call_info.source,
+                                name_tag: raw_args.call_info.name_tag,
+                            }
+                        };
+                        let mut result = converter.run(new_args.with_input(input), &registry);
+                        let result_vec: Vec<Result<ReturnSuccess, ShellError>> = result.drain_vec().await;
+                        if converter.is_binary() {
+                            process_binary_return_success!('scope, result_vec, name_tag)
+                        } else {
+                            process_string_return_success!('scope, result_vec, name_tag)
+                        }
+                    } else {
+                        process_string!('scope, input, name_tag)
+                    }
+                } else {
+                    process_string!('scope, input, name_tag)
+                }
             } else {
-                string_from(&input)
+                Ok(string_from(&input).into_bytes())
             };
-
-            match content {
-                Ok(save_data) => match std::fs::write(full_path, save_data) {
-                    Ok(o) => o,
-                    Err(e) => yield Err(ShellError::string(e.to_string())),
-                },
-                Err(e) => yield Err(ShellError::string(e.to_string())),
-            }
-
         };
 
-        Ok(OutputStream::new(stream))
-    }
+        match content {
+            Ok(save_data) => match std::fs::write(full_path, save_data) {
+                Ok(o) => o,
+                Err(e) => yield Err(ShellError::labeled_error(e.to_string(), "IO error while saving", name)),
+            },
+            Err(e) => yield Err(e),
+        }
+
+    };
+
+    Ok(OutputStream::new(stream))
 }
 
-fn string_from(input: &Vec<Tagged<Value>>) -> Result<String, ShellError> {
+fn string_from(input: &[Value]) -> String {
     let mut save_data = String::new();
 
-    if input.len() > 0 {
+    if !input.is_empty() {
         let mut first = true;
         for i in input.iter() {
             if !first {
@@ -150,60 +243,5 @@ fn string_from(input: &Vec<Tagged<Value>>) -> Result<String, ShellError> {
         }
     }
 
-    Ok(save_data)
-}
-
-fn to_string_for(
-    ext: Option<&std::ffi::OsStr>,
-    input: &Vec<Tagged<Value>>,
-) -> Result<String, ShellError> {
-    let contents = match ext {
-        Some(x) if x == "csv" => {
-            if input.len() != 1 {
-                return Err(ShellError::string(
-                    "saving to csv requires a single object (or use --raw)",
-                ));
-            }
-            to_csv_to_string(&value_to_csv_value(&input[0]))?
-        }
-        Some(x) if x == "toml" => {
-            if input.len() != 1 {
-                return Err(ShellError::string(
-                    "saving to toml requires a single object (or use --raw)",
-                ));
-            }
-            toml::to_string(&value_to_toml_value(&input[0]))?
-        }
-        Some(x) if x == "json" => {
-            if input.len() != 1 {
-                return Err(ShellError::string(
-                    "saving to json requires a single object (or use --raw)",
-                ));
-            }
-            serde_json::to_string(&value_to_json_value(&input[0]))?
-        }
-        Some(x) if x == "yml" => {
-            if input.len() != 1 {
-                return Err(ShellError::string(
-                    "saving to yml requires a single object (or use --raw)",
-                ));
-            }
-            serde_yaml::to_string(&value_to_yaml_value(&input[0]))?
-        }
-        Some(x) if x == "yaml" => {
-            if input.len() != 1 {
-                return Err(ShellError::string(
-                    "saving to yaml requires a single object (or use --raw)",
-                ));
-            }
-            serde_yaml::to_string(&value_to_yaml_value(&input[0]))?
-        }
-        _ => {
-            return Err(ShellError::string(
-                "tried saving a single object with an unrecognized format.",
-            ))
-        }
-    };
-
-    Ok(contents)
+    save_data
 }

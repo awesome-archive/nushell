@@ -1,11 +1,8 @@
-#![feature(crate_visibility_modifier)]
-#![feature(in_band_lifetimes)]
-#![feature(generators)]
-#![feature(try_trait)]
-#![feature(bind_by_move_pattern_guards)]
-#![feature(option_flattening)]
-#![feature(specialization)]
-#![feature(proc_macro_hygiene)]
+#![recursion_limit = "2048"]
+
+#[cfg(test)]
+#[macro_use]
+extern crate indexmap;
 
 #[macro_use]
 mod prelude;
@@ -13,29 +10,26 @@ mod prelude;
 mod cli;
 mod commands;
 mod context;
+mod data;
+mod deserializer;
 mod env;
-mod errors;
 mod evaluate;
 mod format;
 mod git;
-mod object;
-mod parser;
-mod plugin;
 mod shell;
 mod stream;
-mod traits;
 mod utils;
 
-pub use crate::commands::command::{CallInfo, ReturnSuccess, ReturnValue};
-pub use crate::context::{SourceMap, SpanSource};
+pub use crate::cli::cli;
+pub use crate::data::config::{config_path, APP_INFO};
+pub use crate::data::dict::TaggedListBuilder;
+pub use crate::data::primitive;
+pub use crate::data::value;
 pub use crate::env::host::BasicHost;
-pub use crate::object::base::OF64;
-pub use crate::plugin::{serve_plugin, Plugin};
-pub use crate::utils::{AbsolutePath, RelativePath};
-pub use cli::cli;
-pub use errors::ShellError;
-pub use object::base::{Primitive, Value};
-pub use object::dict::{Dictionary, TaggedDictBuilder};
-pub use object::meta::{Span, Tag, Tagged, TaggedItem};
-pub use parser::parse::text::Text;
-pub use parser::registry::{EvaluatedArgs, NamedType, PositionalType, Signature};
+pub use nu_parser::TokenTreeBuilder;
+pub use nu_value_ext::ValueExt;
+pub use num_traits::cast::ToPrimitive;
+
+// TODO: Temporary redirect
+pub use nu_protocol::{did_you_mean, TaggedDictBuilder};
+//pub use nu_plugin::{serve_plugin, Plugin};

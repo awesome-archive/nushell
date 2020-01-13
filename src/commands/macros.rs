@@ -1,11 +1,4 @@
 #[doc(hidden)]
-#[allow(unused)]
-macro_rules! named_type {
-    ($name:ident) => {
-        $crate::parser::registry::NamedType::$($name)*
-    }
-}
-
 #[macro_export]
 macro_rules! command {
     (
@@ -52,8 +45,8 @@ macro_rules! command {
                 stringify!($config_name)
             }
 
-            fn config(&self) -> $crate::parser::registry::Signature {
-                $crate::parser::registry::Signature {
+            fn config(&self) -> $nu_parser::registry::Signature {
+                $nu_parser::registry::Signature {
                     name: self.name().to_string(),
                     positional: vec![$($mandatory_positional)*],
                     rest_positional: false,
@@ -61,13 +54,13 @@ macro_rules! command {
                     is_sink: false,
 
                     named: {
-                        use $crate::parser::registry::NamedType;
+                        use $nu_parser::registry::NamedType;
 
                         #[allow(unused_mut)]
                         let mut named: indexmap::IndexMap<String, NamedType> = indexmap::IndexMap::new();
 
                         $(
-                            named.insert(stringify!($named_param).to_string(), $crate::parser::registry::NamedType::$named_kind);
+                            named.insert(stringify!($named_param).to_string(), $nu_parser::registry::NamedType::$named_kind);
                         )*
 
                         named
@@ -121,7 +114,7 @@ macro_rules! command {
                 $($extract)* {
                     use std::convert::TryInto;
 
-                    $args.get(stringify!($param_name)).clone().try_into()?
+                    $args.get(stringify!($param_name)).try_into()?
                 }
             }
         );
@@ -171,7 +164,7 @@ macro_rules! command {
                 $($extract)* {
                     use std::convert::TryInto;
 
-                    $args.get(stringify!($param_name)).clone().try_into()?
+                    $args.get(stringify!($param_name)).try_into()?
                 }
             }
         );
@@ -221,7 +214,7 @@ macro_rules! command {
                 $($extract)* {
                     use std::convert::TryInto;
 
-                    $args.get(stringify!($param_name)).clone().try_into()?
+                    $args.get(stringify!($param_name)).try_into()?
                 }
             }
         );
@@ -257,7 +250,7 @@ macro_rules! command {
             Rest { $($rest)* }
             Signature {
                 name: $config_name,
-                mandatory_positional: vec![ $($mandatory_positional)* $crate::parser::registry::PositionalType::mandatory_block(
+                mandatory_positional: vec![ $($mandatory_positional)* $nu_parser::registry::PositionalType::mandatory_block(
                     stringify!($param_name)
                 ), ],
                 optional_positional: vec![ $($optional_positional)* ],
@@ -273,7 +266,7 @@ macro_rules! command {
 
             Extract {
                 $($extract:tt)* {
-                    use $crate::object::types::ExtractType;
+                    use $crate::data::types::ExtractType;
                     let value = $args.expect_nth($($positional_count)*)?;
                     Block::extract(value)?
                 }
@@ -312,7 +305,7 @@ macro_rules! command {
             Rest { $($rest)* }
             Signature {
                 name: $config_name,
-                mandatory_positional: vec![ $($mandatory_positional)* $crate::parser::registry::PositionalType::mandatory(
+                mandatory_positional: vec![ $($mandatory_positional)* $nu_parser::registry::PositionalType::mandatory(
                     stringify!($param_name), <$param_kind>::syntax_type()
                 ), ],
                 optional_positional: vec![ $($optional_positional)* ],
@@ -328,7 +321,7 @@ macro_rules! command {
 
             Extract {
                 $($extract:tt)* {
-                    use $crate::object::types::ExtractType;
+                    use $crate::data::types::ExtractType;
                     let value = $args.expect_nth($($positional_count)*)?;
                     <$param_kind>::extract(&value)?
                 }
@@ -356,39 +349,4 @@ macro_rules! command {
             }
         );
     };
-
-    // ($export:ident as $name:tt ( $args:ident, -- $param:ident : $kind:ident ) $body:block) => {
-    //     #[allow(non_camel_case_types)]
-    //     pub struct $export;
-
-    //     impl Command for $export {
-    //         fn run(&self, $args: CommandArgs) -> Result<OutputStream, ShellError> {
-    //             fn command($args: CommandArgs, $param: $kind) -> Result<OutputStream, ShellError> {
-    //                 $body
-    //             }
-
-    //             use std::convert::TryInto;
-
-    //             let param = $args.get(stringify!($param)).try_into()?;
-    //             command($args, param)
-    //         }
-
-    //         fn name(&self) -> &str {
-    //             stringify!($name)
-    //         }
-
-    //         fn config(&self) -> Signature {
-    //             let mut named: IndexMap<String, NamedType> = IndexMap::new();
-    //             named.insert(stringify!($param).to_string(), NamedType::$kind);
-
-    //             Signature {
-    //                 name: self.name().to_string(),
-    //                 mandatory_positional: vec![],
-    //                 optional_positional: vec![],
-    //                 rest_positional: false,
-    //                 named,
-    //             }
-    //         }
-    //     }
-    // };
 }

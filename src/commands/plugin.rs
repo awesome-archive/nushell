@@ -1,8 +1,9 @@
 use crate::commands::WholeStreamCommand;
-use crate::errors::ShellError;
-use crate::parser::registry;
 use crate::prelude::*;
 use derive_new::new;
+use log::trace;
+use nu_errors::ShellError;
+use nu_protocol::{Primitive, ReturnSuccess, ReturnValue, Scope, Signature, UntaggedValue, Value};
 use serde::{self, Deserialize, Serialize};
 use std::io::prelude::*;
 use std::io::BufReader;
@@ -38,7 +39,7 @@ pub enum NuResult {
 pub struct PluginCommand {
     name: String,
     path: String,
-    config: registry::Signature,
+    config: Signature,
 }
 
 impl WholeStreamCommand for PluginCommand {
@@ -46,8 +47,12 @@ impl WholeStreamCommand for PluginCommand {
         &self.name
     }
 
-    fn signature(&self) -> registry::Signature {
+    fn signature(&self) -> Signature {
         self.config.clone()
+    }
+
+    fn usage(&self) -> &str {
+        &self.config.usage
     }
 
     fn run(
@@ -64,7 +69,12 @@ pub fn filter_plugin(
     args: CommandArgs,
     registry: &CommandRegistry,
 ) -> Result<OutputStream, ShellError> {
-    let args = args.evaluate_once(registry)?;
+    trace!("filter_plugin :: {}", path);
+
+    let args = args.evaluate_once_with_scope(
+        registry,
+        &Scope::it_value(UntaggedValue::string("$it").into_untagged_value()),
+    )?;
 
     let mut child = std::process::Command::new(path)
         .stdin(std::process::Stdio::piped())
@@ -72,20 +82,22 @@ pub fn filter_plugin(
         .spawn()
         .expect("Failed to spawn child process");
 
-    let mut bos: VecDeque<Tagged<Value>> = VecDeque::new();
-    bos.push_back(Value::Primitive(Primitive::BeginningOfStream).tagged_unknown());
+    let mut bos: VecDeque<Value> = VecDeque::new();
+    bos.push_back(UntaggedValue::Primitive(Primitive::BeginningOfStream).into_untagged_value());
 
-    let mut eos: VecDeque<Tagged<Value>> = VecDeque::new();
-    eos.push_back(Value::Primitive(Primitive::EndOfStream).tagged_unknown());
+    let mut eos: VecDeque<Value> = VecDeque::new();
+    eos.push_back(UntaggedValue::Primitive(Primitive::EndOfStream).into_untagged_value());
 
     let call_info = args.call_info.clone();
+
+    trace!("filtering :: {:?}", call_info);
 
     let stream = bos
         .chain(args.input.values)
         .chain(eos)
         .map(move |v| match v {
-            Tagged {
-                item: Value::Primitive(Primitive::BeginningOfStream),
+            Value {
+                value: UntaggedValue::Primitive(Primitive::BeginningOfStream),
                 ..
             } => {
                 let stdin = child.stdin.as_mut().expect("Failed to open stdin");
@@ -94,8 +106,27 @@ pub fn filter_plugin(
                 let mut reader = BufReader::new(stdout);
 
                 let request = JsonRpc::new("begin_filter", call_info.clone());
-                let request_raw = serde_json::to_string(&request).unwrap();
-                let _ = stdin.write(format!("{}\n", request_raw).as_bytes()); // TODO: Handle error
+                let request_raw = serde_json::to_string(&request);
+
+                match request_raw {
+                    Err(_) => {
+                        let mut result = VecDeque::new();
+                        result.push_back(Err(ShellError::labeled_error(
+                            "Could not load json from plugin",
+                            "could not load json from plugin",
+                            &call_info.name_tag,
+                        )));
+                        return result;
+                    }
+                    Ok(request_raw) => match stdin.write(format!("{}\n", request_raw).as_bytes()) {
+                        Ok(_) => {}
+                        Err(err) => {
+                            let mut result = VecDeque::new();
+                            result.push_back(Err(ShellError::unexpected(format!("{}", err))));
+                            return result;
+                        }
+                    },
+                }
 
                 let mut input = String::new();
                 match reader.read_line(&mut input) {
@@ -112,7 +143,7 @@ pub fn filter_plugin(
                             },
                             Err(e) => {
                                 let mut result = VecDeque::new();
-                                result.push_back(Err(ShellError::string(format!(
+                                result.push_back(Err(ShellError::untagged_runtime_error(format!(
                                     "Error while processing begin_filter response: {:?} {}",
                                     e, input
                                 ))));
@@ -122,7 +153,7 @@ pub fn filter_plugin(
                     }
                     Err(e) => {
                         let mut result = VecDeque::new();
-                        result.push_back(Err(ShellError::string(format!(
+                        result.push_back(Err(ShellError::untagged_runtime_error(format!(
                             "Error while reading begin_filter response: {:?}",
                             e
                         ))));
@@ -130,8 +161,8 @@ pub fn filter_plugin(
                     }
                 }
             }
-            Tagged {
-                item: Value::Primitive(Primitive::EndOfStream),
+            Value {
+                value: UntaggedValue::Primitive(Primitive::EndOfStream),
                 ..
             } => {
                 let stdin = child.stdin.as_mut().expect("Failed to open stdin");
@@ -140,11 +171,19 @@ pub fn filter_plugin(
                 let mut reader = BufReader::new(stdout);
 
                 let request: JsonRpc<std::vec::Vec<Value>> = JsonRpc::new("end_filter", vec![]);
-                let request_raw = serde_json::to_string(&request).unwrap();
+                let request_raw = match serde_json::to_string(&request) {
+                    Ok(req) => req,
+                    Err(err) => {
+                        let mut result = VecDeque::new();
+                        result.push_back(Err(ShellError::unexpected(format!("{}", err))));
+                        return result;
+                    }
+                };
+
                 let _ = stdin.write(format!("{}\n", request_raw).as_bytes()); // TODO: Handle error
 
                 let mut input = String::new();
-                match reader.read_line(&mut input) {
+                let result = match reader.read_line(&mut input) {
                     Ok(_) => {
                         let response = serde_json::from_str::<NuResult>(&input);
                         match response {
@@ -152,8 +191,20 @@ pub fn filter_plugin(
                                 Ok(params) => {
                                     let request: JsonRpc<std::vec::Vec<Value>> =
                                         JsonRpc::new("quit", vec![]);
-                                    let request_raw = serde_json::to_string(&request).unwrap();
-                                    let _ = stdin.write(format!("{}\n", request_raw).as_bytes()); // TODO: Handle error
+                                    let request_raw = serde_json::to_string(&request);
+                                    match request_raw {
+                                        Ok(request_raw) => {
+                                            let _ = stdin.write(format!("{}\n", request_raw).as_bytes()); // TODO: Handle error
+                                        }
+                                        Err(e) => {
+                                            let mut result = VecDeque::new();
+                                            result.push_back(Err(ShellError::untagged_runtime_error(format!(
+                                                "Error while processing begin_filter response: {:?} {}",
+                                                e, input
+                                            ))));
+                                            return result;
+                                        }
+                                    }
 
                                     params
                                 }
@@ -165,7 +216,7 @@ pub fn filter_plugin(
                             },
                             Err(e) => {
                                 let mut result = VecDeque::new();
-                                result.push_back(Err(ShellError::string(format!(
+                                result.push_back(Err(ShellError::untagged_runtime_error(format!(
                                     "Error while processing end_filter response: {:?} {}",
                                     e, input
                                 ))));
@@ -175,13 +226,17 @@ pub fn filter_plugin(
                     }
                     Err(e) => {
                         let mut result = VecDeque::new();
-                        result.push_back(Err(ShellError::string(format!(
+                        result.push_back(Err(ShellError::untagged_runtime_error(format!(
                             "Error while reading end_filter: {:?}",
                             e
                         ))));
                         result
                     }
-                }
+                };
+
+                let _ = child.wait();
+
+                result
             }
             _ => {
                 let stdin = child.stdin.as_mut().expect("Failed to open stdin");
@@ -190,8 +245,20 @@ pub fn filter_plugin(
                 let mut reader = BufReader::new(stdout);
 
                 let request = JsonRpc::new("filter", v);
-                let request_raw = serde_json::to_string(&request).unwrap();
-                let _ = stdin.write(format!("{}\n", request_raw).as_bytes()); // TODO: Handle error
+                let request_raw = serde_json::to_string(&request);
+                match request_raw {
+                    Ok(request_raw) => {
+                        let _ = stdin.write(format!("{}\n", request_raw).as_bytes()); // TODO: Handle error
+                    }
+                    Err(e) => {
+                        let mut result = VecDeque::new();
+                        result.push_back(Err(ShellError::untagged_runtime_error(format!(
+                            "Error while processing filter response: {:?}",
+                            e
+                        ))));
+                        return result;
+                    }
+                }
 
                 let mut input = String::new();
                 match reader.read_line(&mut input) {
@@ -208,8 +275,8 @@ pub fn filter_plugin(
                             },
                             Err(e) => {
                                 let mut result = VecDeque::new();
-                                result.push_back(Err(ShellError::string(format!(
-                                    "Error while processing filter response: {:?} {}",
+                                result.push_back(Err(ShellError::untagged_runtime_error(format!(
+                                    "Error while processing filter response: {:?}\n== input ==\n{}",
                                     e, input
                                 ))));
                                 result
@@ -218,7 +285,7 @@ pub fn filter_plugin(
                     }
                     Err(e) => {
                         let mut result = VecDeque::new();
-                        result.push_back(Err(ShellError::string(format!(
+                        result.push_back(Err(ShellError::untagged_runtime_error(format!(
                             "Error while reading filter response: {:?}",
                             e
                         ))));
@@ -236,7 +303,7 @@ pub fn filter_plugin(
 pub struct PluginSink {
     name: String,
     path: String,
-    config: registry::Signature,
+    config: Signature,
 }
 
 impl WholeStreamCommand for PluginSink {
@@ -244,8 +311,12 @@ impl WholeStreamCommand for PluginSink {
         &self.name
     }
 
-    fn signature(&self) -> registry::Signature {
+    fn signature(&self) -> Signature {
         self.config.clone()
+    }
+
+    fn usage(&self) -> &str {
+        &self.config.usage
     }
 
     fn run(
@@ -262,25 +333,39 @@ pub fn sink_plugin(
     args: CommandArgs,
     registry: &CommandRegistry,
 ) -> Result<OutputStream, ShellError> {
-    //use subprocess::Exec;
     let args = args.evaluate_once(registry)?;
     let call_info = args.call_info.clone();
 
-    let stream = async_stream_block! {
-        let input: Vec<Tagged<Value>> = args.input.values.collect().await;
+    let stream = async_stream! {
+        let input: Vec<Value> = args.input.values.collect().await;
 
         let request = JsonRpc::new("sink", (call_info.clone(), input));
-        let request_raw = serde_json::to_string(&request).unwrap();
-        let mut tmpfile = tempfile::NamedTempFile::new().unwrap();
-        let _ = writeln!(tmpfile, "{}", request_raw);
-        let _ = tmpfile.flush();
+        let request_raw = serde_json::to_string(&request);
+        if let Ok(request_raw) = request_raw {
+            if let Ok(mut tmpfile) = tempfile::NamedTempFile::new() {
+                let _ = writeln!(tmpfile, "{}", request_raw);
+                let _ = tmpfile.flush();
 
-        let mut child = std::process::Command::new(path)
-            .arg(tmpfile.path())
-            .spawn()
-            .expect("Failed to spawn child process");
+                let mut child = std::process::Command::new(path)
+                    .arg(tmpfile.path())
+                    .spawn();
 
-        let _ = child.wait();
+                if let Ok(mut child) = child {
+                    let _ = child.wait();
+
+                    // Needed for async_stream to type check
+                    if false {
+                        yield ReturnSuccess::value(UntaggedValue::nothing().into_untagged_value());
+                    }
+                } else {
+                    yield Err(ShellError::untagged_runtime_error("Could not create process for sink command"));
+                }
+            } else {
+                yield Err(ShellError::untagged_runtime_error("Could not open file to send sink command message"));
+            }
+        } else {
+            yield Err(ShellError::untagged_runtime_error("Could not create message to sink command"));
+        }
     };
     Ok(OutputStream::new(stream))
 }
